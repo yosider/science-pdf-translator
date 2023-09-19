@@ -1,0 +1,7 @@
+.vscode
+.env
+.python-version
+__nougat_output/
+__pycache__/
+*.pdf
+output/
