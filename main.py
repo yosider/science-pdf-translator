@@ -3,59 +3,36 @@ import os
 import re
 import subprocess
 from pathlib import Path
+from typing import List, Tuple
 
 import requests
 from dotenv import load_dotenv
-from pylatexenc.latexwalker import LatexCharsNode, LatexWalker
+from pylatexenc.latexwalker import LatexNode, LatexWalker, LatexEnvironmentNode
 
-from utils.to_scrapbox import (
-    mask_reference,
-    node_to_expr,
-    replace_post_translation,
-    # replace_pre_translation,
-    unmask_reference,
-)
-from utils.utils import get_next_mask
+from utils.to_scrapbox import node2mask, ReferenceMasker
 
 
-def parse(tex):
-    """
-    Parse the given LaTeX or Mathpix Markdown text into a list of nodes.
-
-    Args:
-        tex (str): The text to parse.
-
-    Returns:
-        list: A list of parsed nodes.
-    """
+def parse(tex: str) -> List[LatexNode]:
     w = LatexWalker(tex)
     nodelist, *_ = w.get_latex_nodes(pos=0)
-    return nodelist
+
+    # extract document body
+    for node in nodelist[::-1]:
+        if (
+            isinstance(node, LatexEnvironmentNode)
+            and node.environmentname == "document"
+        ):
+            return node.nodelist
+
+    print("Error: No document environment found.")
+    exit(1)
 
 
-def mask_codes(nodelist):
-    """
-    Replace non-text LaTeX elements (e.g., equations, macros) with masks to avoid translation.
-
-    Args:
-        nodelist (list): A list of parsed LaTeX nodes.
-
-    Returns:
-        tuple:
-        - masked_text (str): The text with masked codes.
-        - mask_dict (dict): A dictionary mapping masks to their corresponding LaTeX nodes.
-    """
-    masked_text = ""
-    mask_dict = {}
-    mask_count = 0
-    for node in nodelist:
-        if isinstance(node, LatexCharsNode):
-            masked_text += node.chars
-        else:
-            mask = get_next_mask(mask_count)
-            masked_text += mask
-            mask_dict[mask] = node
-            mask_count += 1
+def make_masked_text(nodelist: List[LatexNode]) -> Tuple[str, Tuple[str, str]]:
+    # TODO: make this class?
+    masked_expr_list, mask_pairs = zip(*[node2mask(node) for node in nodelist])
+    masked_text = "".join(masked_expr_list)
+    mask_dict = dict(filter(lambda x: x is not None, mask_pairs))
     return masked_text, mask_dict
 
 
@@ -94,24 +71,11 @@ def translate_text(api_key, text, source_lang, target_lang):
     return response.json()["translations"][0]["text"]
 
 
-def unmask_codes(translated_text, mask_dict):
-    """
-    Replace the masks in the translated text with their corresponding expressions.
-    The expressions are converted to desired formats.
-
-    Args:
-        translated_text (str): The text that has been translated and contains masks to be replaced.
-        mask_dict (dict): A dictionary mapping masks to LaTeX nodes.
-
-    Returns:
-        unmasked (str): The translated text with all masks replaced by their corresponding expressions.
-    """
-    for mask, node in mask_dict.items():
-        expr = node_to_expr(node)
+def make_unmasked_text(masked_text: str, mask_dict: dict) -> str:
+    for mask, expr in mask_dict.items():
         expr = re.sub(r"\\", r"\\\\", expr)  # escape backslashes
-        translated_text = re.sub(mask, expr, translated_text, flags=re.IGNORECASE)
-        # translated_text = translated_text.replace(mask, expr)
-    return translated_text
+        masked_text = re.sub(mask, expr, masked_text, flags=re.IGNORECASE)
+    return masked_text
 
 
 def main():
@@ -131,16 +95,13 @@ def main():
     with open(path, "r", encoding="utf-8") as f:
         tex = f.read()
 
-    # pre-parse process
-    tex = re.sub(r"```(.+?)```", r"\1", tex)  # remove code blocks
-
     nodelist = parse(tex)
 
-    masked_text, mask_dict = mask_codes(nodelist)
-
     # pre-translation process
-    masked_text, ref_text = mask_reference(masked_text)
-    # masked_text = replace_pre_translation(masked_text)
+    masked_text, mask_dict = make_masked_text(nodelist)
+    ref_masker = ReferenceMasker()
+    masked_text = ref_masker.mask(masked_text)
+
     with open(path.with_suffix(".mask.log"), "w", encoding="utf-8") as f:
         f.write(masked_text)
 
@@ -152,12 +113,10 @@ def main():
         f.write(translated_text)
 
     # post-translation process
-    translated_text = unmask_reference(translated_text, ref_text)
-    translated_text = replace_post_translation(translated_text)
+    translated_text = ref_masker.unmask(translated_text)
     with open(path.with_suffix(".post.log"), "w", encoding="utf-8") as f:
         f.write(translated_text)
-
-    output = unmask_codes(translated_text, mask_dict)
+    output = make_unmasked_text(translated_text, mask_dict)
     with open(path.with_suffix(".out.log"), "w", encoding="utf-8") as f:
         f.write(output)
 

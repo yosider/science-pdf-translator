@@ -5,3 +5,4 @@ __nougat_output/
 __pycache__/
 *.pdf
 output/
+tmp/
